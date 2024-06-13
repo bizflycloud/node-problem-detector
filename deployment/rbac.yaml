@@ -17,3 +17,5 @@ subjects:
   - kind: ServiceAccount
     name: node-problem-detector
     namespace: kube-system
+
+
