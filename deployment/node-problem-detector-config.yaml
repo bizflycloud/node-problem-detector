@@ -1,9 +1,122 @@
 apiVersion: v1
 data:
+  health-checker-kubelet.json: |
+    {
+      "plugin": "custom",
+      "pluginConfig": {
+        "invoke_interval": "10s",
+        "timeout": "3m",
+        "max_output_length": 80,
+        "concurrency": 1
+      },
+      "source": "health-checker",
+      "metricsReporting": true,
+      "conditions": [
+        {
+          "type": "KubeletUnhealthy",
+          "reason": "KubeletIsHealthy",
+          "message": "kubelet on the node is functioning properly"
+        }
+      ],
+      "rules": [
+        {
+          "type": "permanent",
+          "condition": "KubeletUnhealthy",
+          "reason": "KubeletUnhealthy",
+          "path": "/home/kubernetes/bin/health-checker",
+          "args": [
+            "--component=kubelet",
+            "--enable-repair=true",
+            "--cooldown-time=1m",
+            "--loopback-time=0",
+            "--health-check-timeout=10s"
+          ],
+          "timeout": "3m"
+        }
+      ]
+    }
+  check_inodes.sh: |
+    #!/bin/bash
+    # check inode utilization on block device of mounting point /
+    OK=0
+    NONOK=1
+    UNKNOWN=2
+
+    iuse=$(df -i | grep "/$" | grep -e [0-9]*% -o | tr -d %)
+
+    if [[ $iuse -gt 80 ]]; then
+    echo "current inode usage is over 80% on node"
+    exit $NONOK
+    fi
+    echo "node has no inode pressure"
+    exit $OK
+
+  check_pid_pressure.sh: |
+    #!/bin/sh
+
+    OK=0
+    NONOK=1
+    UNKNOWN=2
+
+    pidMax=$(cat /proc/sys/kernel/pid_max)
+    threshold=85
+    availablePid=$(($pidMax * $threshold / 100))
+    activePid=$(ls /proc/ |grep  -e "[0-9]" |wc -l)
+    if [ $activePid -gt $availablePid ]; then
+        echo "Total running PIDs: $activePid, greater than $availablePid ($threshold% of pidMax $pidMax)"
+        exit $NONOK
+    fi
+
+    echo "Has sufficient PID available"
+    exit $OK
+
+  check_systemd.sh: |
+    #!/bin/bash
+    OK=0
+    NONOK=1
+    UNKNOWN=2
+
+    systemctl --version
+    if [ $? -ne 0 ]; then
+        exit ${UNKNOWN}
+    fi
+
+    systemctl get-default
+    if [ $? -ne 0 ]; then
+        exit ${NONOK}
+    fi
+
+  inodes-problem-monitor.json: |
+    {
+      "plugin": "custom",
+      "pluginConfig": {
+        "invoke_interval": "120s",
+        "timeout": "30s",
+        "max_output_length": 80,
+        "concurrency": 3
+      },
+      "source": "inodes-custom-plugin-monitor",
+      "conditions": [
+        {
+          "type": "InodesPressure",
+          "reason": "NodeHasNoInodesPressure",
+          "message": "node has no inodes pressure"
+        }
+      ],
+      "rules": [
+        {
+          "type": "permanent",
+          "condition": "InodesPressure",
+          "reason": "NodeHasInodesPressure",
+          "message": "inodes usage is over 80% on /dev/sda",
+          "path": "./config/check_inodes.sh"
+        }
+      ]
+    }
   kernel-monitor.json: |
     {
         "plugin": "kmsg",
-        "logPath": "/dev/kmsg",
+        "logPath": "/var/log/journal",
         "lookback": "5m",
         "bufferSize": 10,
         "source": "kernel-monitor",
@@ -15,15 +128,15 @@ data:
             },
             {
                 "type": "ReadonlyFilesystem",
-                "reason": "FilesystemIsNotReadOnly",
-                "message": "Filesystem is not read-only"
+                "reason": "FilesystemIsReadOnly",
+                "message": "Filesystem is read-only"
             }
         ],
         "rules": [
             {
                 "type": "temporary",
-                "reason": "OOMKilling",
-                "pattern": "Kill process \\d+ (.+) score \\d+ or sacrifice child\\nKilled process \\d+ (.+) total-vm:\\d+kB, anon-rss:\\d+kB, file-rss:\\d+kB.*"
+                "reason": "PodOOMKilling",
+                "pattern": "(Task in /kubepods.slice/(.+) killed as a result of limit of .*)|(oom-kill.*oom_memcg=/kubepods.slice/(.+),task_memcg=.*)|(oom_reaper: reaped process \\d+ (.+), now anon-rss:\\d+kB, file-rss:\\d+kB, shmem-rss:\\d+kB.*)"
             },
             {
                 "type": "temporary",
@@ -46,43 +159,239 @@ data:
                 "pattern": "divide error: 0000 \\[#\\d+\\] SMP"
             },
             {
-    			"type": "temporary",
-    			"reason": "MemoryReadError",
-    			"pattern": "CE memory read error .*"
-            },
-            {
                 "type": "permanent",
                 "condition": "KernelDeadlock",
-                "reason": "DockerHung",
-                "pattern": "task docker:\\w+ blocked for more than \\w+ seconds\\."
+                "reason": "AUFSUmountHung",
+                "pattern": "task umount\\.aufs:\\w+ blocked for more than \\w+ seconds\\."
             },
             {
                 "type": "permanent",
                 "condition": "ReadonlyFilesystem",
                 "reason": "FilesystemIsReadOnly",
                 "pattern": "Remounting filesystem read-only"
-            }
-        ]
-    }
-  docker-monitor.json: |
-    {
-        "plugin": "journald",
-        "pluginConfig": {
-            "source": "dockerd"
-        },
-        "logPath": "/var/log/journal",
-        "lookback": "5m",
-        "bufferSize": 10,
-        "source": "docker-monitor",
-        "conditions": [],
-        "rules": [
+            },
             {
                 "type": "temporary",
-                "reason": "CorruptDockerImage",
-                "pattern": "Error trying v2 registry: failed to register layer: rename /var/lib/docker/image/(.+) /var/lib/docker/image/(.+): directory not empty.*"
+                "reason": "TCPMemOverFlow",
+                "pattern": "TCP: out of memory -- consider tuning tcp_mem"
+            },
+            {
+                "type": "temporary",
+                "reason": "TCPSkOverFlow",
+                "pattern": "TCP: too many orphaned sockets"
+            },
+            {
+                "type": "temporary",
+                "reason": "NFOverFlow",
+                "pattern": "nf_conntrack: table full, dropping packet"
+            },
+            {
+                "type": "temporary",
+                "reason": "ARPOverFlow",
+                "pattern": "\\w+: neighbor table overflow!"
+            },
+            {
+                "type": "temporary",
+                "reason": "BlockIOError",
+                "pattern": "Buffer I/O error on device (.+), logical block \\d+"
+            },
+            {
+                "type": "temporary",
+                "reason": "Ext4Error",
+                "pattern": "EXT4-fs error .*"
+            },
+            {
+                "type": "temporary",
+                "reason": "BlockIOError",
+                "pattern": "blk_update_request: I/O error, dev \\w+, sector \\d+"
+            },
+            {
+                "type": "temporary",
+                "reason": "FileOpenLimit",
+                "pattern": "VFS: file-max limit \\d+ reached"
+            },
+            {
+                "type": "temporary",
+                "reason": "SlabFreeErr",
+                "pattern": "cache_from_obj: Wrong slab cache. (.+) but object is from (.+)"
+            },
+            {
+                "type": "temporary",
+                "reason": "MemPageFailed",
+                "pattern": "page allocation failure(.) order:[3-5],(.+)"
+            },
+            {
+                "type": "temporary",
+                "reason": "SoftLockUp",
+                "pattern": "BUG: soft lockup - CPU#\\d+ stuck for (.+)"
+            },
+            {
+                "type": "temporary",
+                "reason": "SchedInAtomic",
+                "pattern": "BUG: scheduling while atomic:(.+)"
+            },
+            {
+                "type": "temporary",
+                "reason": "RCUStall",
+                "pattern": "INFO: \\w+ self-detected stall on CPU (.+)"
+            },
+            {
+                "type": "temporary",
+                "reason": "PCICardErr",
+                "pattern": "Card not present on Slot(.+)"
             }
         ]
     }
+  network-problem-monitor.json: |
+    {
+      "plugin": "custom",
+      "pluginConfig": {
+        "invoke_interval": "30s",
+        "timeout": "5s",
+        "max_output_length": 80,
+        "concurrency": 3
+      },
+      "source": "network-custom-plugin-monitor",
+      "metricsReporting": true,
+      "conditions": [],
+      "rules": [
+        {
+          "type": "temporary",
+          "reason": "ConntrackFull",
+          "path": "./config/network_problem.sh",
+          "timeout": "3s"
+        }
+      ]
+    }
+  network_problem.sh: |
+    #!/bin/bash
+
+    # This plugin checks for common network issues.
+    # Currently only checks if conntrack table is more than 90% used.
+
+    readonly OK=0
+    readonly NONOK=1
+    readonly UNKNOWN=2
+
+    # "nf_conntrack" replaces "ip_conntrack" - support both
+    readonly NF_CT_COUNT_PATH='/proc/sys/net/netfilter/nf_conntrack_count'
+    readonly NF_CT_MAX_PATH='/proc/sys/net/netfilter/nf_conntrack_max'
+    readonly IP_CT_COUNT_PATH='/host/proc/sys/net/ipv4/netfilter/ip_conntrack_count'
+    readonly IP_CT_MAX_PATH='/host/proc/sys/net/ipv4/netfilter/ip_conntrack_max'
+
+    if [[ -f $NF_CT_COUNT_PATH ]] && [[ -f $NF_CT_MAX_PATH ]]; then
+      readonly CT_COUNT_PATH=$NF_CT_COUNT_PATH
+      readonly CT_MAX_PATH=$NF_CT_MAX_PATH
+    elif [[ -f $IP_CT_COUNT_PATH ]] && [[ -f $IP_CT_MAX_PATH ]]; then
+      readonly CT_COUNT_PATH=$IP_CT_COUNT_PATH
+      readonly CT_MAX_PATH=$IP_CT_MAX_PATH
+    else
+      exit $UNKNOWN
+    fi
+
+    readonly conntrack_count=$(< $CT_COUNT_PATH) || exit $UNKNOWN
+    readonly conntrack_max=$(< $CT_MAX_PATH) || exit $UNKNOWN
+    readonly conntrack_usage_msg="${conntrack_count} out of ${conntrack_max}"
+
+    if (( conntrack_count > conntrack_max * 9 /10 )); then
+      echo "Conntrack table usage over 90%: ${conntrack_usage_msg}"
+      exit $NONOK
+    else
+      echo "Conntrack table usage: ${conntrack_usage_msg}"
+      exit $OK
+    fi
+  pid-pressure-problem-monitor.json: |
+    {
+      "plugin": "custom",
+      "pluginConfig": {
+        "invoke_interval": "300s",
+        "timeout": "60s",
+        "max_output_length": 100,
+        "concurrency": 3
+      },
+      "source": "pid-pressure-custom-plugin-monitor",
+      "conditions": [
+        {
+          "type": "NodePIDPressure",
+          "reason": "NodeHasNoPIDPressure",
+          "message": "Node has no PID Pressure"
+        }
+      ],
+      "rules": [
+        {
+          "type": "permanent",
+          "condition": "NodePIDPressure",
+          "reason": "NodeHasPIDPressure",
+          "message": "node has no PID available",
+          "path": "./config/check_pid_pressure.sh",
+          "timeout": "20s"
+        }
+      ]
+    }
+  systemd-check-monitor.json: |
+    {
+      "plugin": "custom",
+      "pluginConfig": {
+      "invoke_interval": "300s",
+      "timeout": "60s",
+      "max_output_length": 256,
+      "concurrency": 1
+      },
+      "source": "checkdentry-custom-plugin-monitor",
+      "conditions": [
+        {
+          "type": "SystemdOffline",
+          "reason": "SystemdIsResponsive",
+          "message": "Systemd is responsive"
+        }
+      ],
+      "rules": [
+        {
+          "type": "permanent",
+          "condition": "SystemdOffline",
+          "reason": "SystemdIsUnresponsive",
+          "path": "./config/check_systemd.sh",
+          "message": "Systemd is unresponsive"
+        }
+      ]
+    }
+
+  health-checker-containerd.json: |
+    {
+      "plugin": "custom",
+      "pluginConfig": {
+        "invoke_interval": "10s",
+        "timeout": "3m",
+        "max_output_length": 80,
+        "concurrency": 1
+      },
+      "source": "health-checker",
+      "metricsReporting": true,
+      "conditions": [
+        {
+          "type": "ContainerRuntimeUnhealthy",
+          "reason": "ContainerRuntimeIsHealthy",
+          "message": "Container runtime on the node is functioning properly"
+        }
+      ],
+      "rules": [
+        {
+          "type": "permanent",
+          "condition": "ContainerRuntimeUnhealthy",
+          "reason": "ContainerdUnhealthy",
+          "path": "/home/kubernetes/bin/health-checker",
+          "args": [
+            "--component=cri",
+            "--enable-repair=true",
+            "--cooldown-time=2m",
+            "--health-check-timeout=60s"
+          ],
+          "timeout": "3m"
+        }
+      ]
+    }
+
+
 kind: ConfigMap
 metadata:
   name: node-problem-detector-config

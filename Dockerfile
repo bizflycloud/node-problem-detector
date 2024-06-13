@@ -11,45 +11,69 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-ARG BASEIMAGE
+# ARG BASEIMAGE
 
-# "builder-base" can be overriden using dockerb buildx's --build-context flag,
-# by users who want to use a different images for the builder. E.g. if you need to use an older OS 
-# to avoid dependencies on very recent glibc versions.
-# E.g. of the param: --build-context builder-base=docker-image://golang:<something>@sha256:<something>
-# Must override builder-base, not builder, since the latter is referred to later in the file and so must not be
-# directly replaced. See here, and note that "stage" parameter mentioned there has been renamed to 
-# "build-context": https://github.com/docker/buildx/pull/904#issuecomment-1005871838
-FROM golang:1.22.3-bookworm as builder-base
-FROM builder-base as builder
-LABEL maintainer="Andy Xie <andy.xning@gmail.com>"
+# # "builder-base" can be overriden using dockerb buildx's --build-context flag,
+# # by users who want to use a different images for the builder. E.g. if you need to use an older OS 
+# # to avoid dependencies on very recent glibc versions.
+# # E.g. of the param: --build-context builder-base=docker-image://golang:<something>@sha256:<something>
+# # Must override builder-base, not builder, since the latter is referred to later in the file and so must not be
+# # directly replaced. See here, and note that "stage" parameter mentioned there has been renamed to 
+# # "build-context": https://github.com/docker/buildx/pull/904#issuecomment-1005871838
+# FROM golang:1.22.2-bookworm as builder-base
+# FROM builder-base as builder
+# LABEL maintainer="Andy Xie <andy.xning@gmail.com>"
 
+# ARG TARGETARCH
+
+# ENV GOPATH /gopath/
+# ENV PATH $GOPATH/bin:$PATH
+
+# RUN apt-get update --fix-missing && apt-get --yes install libsystemd-dev gcc-aarch64-linux-gnu 
+# RUN go version
+
+# COPY . /gopath/src/k8s.io/node-problem-detector/
+# WORKDIR /gopath/src/k8s.io/node-problem-detector
+# RUN GOARCH=${TARGETARCH} make bin/node-problem-detector bin/health-checker bin/log-counter
+
+# ARG BASEIMAGE
+# FROM --platform=${TARGETPLATFORM} ${BASEIMAGE}
+
+# LABEL maintainer="Random Liu <lantaol@google.com>"
+
+# RUN clean-install util-linux bash libsystemd-dev systemd curl
+
+# RUN curl https://github.com/kubernetes-sigs/cri-tools/releases/download/v1.26.0/crictl-v1.26.0-linux-amd64.tar.gz && \
+# sudo tar zxvf crictl-$VERSION-linux-amd64.tar.gz -C /usr/local/bin && \
+# rm -f crictl-$VERSION-linux-amd64.tar.gz
+
+# # Avoid symlink of /etc/localtime.
+# RUN test -h /etc/localtime && rm -f /etc/localtime && cp /usr/share/zoneinfo/UTC /etc/localtime || true
+
+# COPY --from=builder /gopath/src/k8s.io/node-problem-detector/bin/node-problem-detector /node-problem-detector
+
+# ARG LOGCOUNTER
+# COPY --from=builder /gopath/src/k8s.io/node-problem-detector/bin/health-checker /gopath/src/k8s.io/node-problem-detector/${LOGCOUNTER} /home/kubernetes/bin/
+
+# COPY --from=builder /gopath/src/k8s.io/node-problem-detector/config/ /config
+# ENTRYPOINT ["/node-problem-detector", "--config.system-log-monitor=/config/kernel-monitor.json"]
+
+FROM registry.k8s.io/node-problem-detector/node-problem-detector:v0.8.18 as builder
+
+# Install crictl
+ARG TARGETOS
 ARG TARGETARCH
+#`BUILDX_ARCH` will be used in the buildx package download URL
+# The required format is in `TARGETOS-TARGETARCH`
+# Set it default to linux-amd64 to make the Dockerfile
+# works with / without buildkit
+ENV BUILDX_ARCH="${TARGETOS:-linux}-${TARGETARCH:-amd64}"
 
-ENV GOPATH /gopath/
-ENV PATH $GOPATH/bin:$PATH
-
-RUN apt-get update --fix-missing && apt-get --yes install libsystemd-dev gcc-aarch64-linux-gnu
-RUN go version
-
-COPY . /gopath/src/k8s.io/node-problem-detector/
-WORKDIR /gopath/src/k8s.io/node-problem-detector
-RUN GOARCH=${TARGETARCH} make bin/node-problem-detector bin/health-checker bin/log-counter
-
-ARG BASEIMAGE
-FROM --platform=${TARGETPLATFORM} ${BASEIMAGE}
-
-LABEL maintainer="Random Liu <lantaol@google.com>"
-
-RUN clean-install util-linux bash libsystemd-dev
-
-# Avoid symlink of /etc/localtime.
-RUN test -h /etc/localtime && rm -f /etc/localtime && cp /usr/share/zoneinfo/UTC /etc/localtime || true
-
-COPY --from=builder /gopath/src/k8s.io/node-problem-detector/bin/node-problem-detector /node-problem-detector
-
-ARG LOGCOUNTER
-COPY --from=builder /gopath/src/k8s.io/node-problem-detector/bin/health-checker /gopath/src/k8s.io/node-problem-detector/${LOGCOUNTER} /home/kubernetes/bin/
-
-COPY --from=builder /gopath/src/k8s.io/node-problem-detector/config/ /config
-ENTRYPOINT ["/node-problem-detector", "--config.system-log-monitor=/config/kernel-monitor.json"]
+ARG VERSION="v1.25.0"
+RUN apt-get -qq update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -qq -y curl unzip < /dev/null > /dev/null && \
+    rm -rf /var/cache/apt/* && \
+    curl -sLO https://github.com/kubernetes-sigs/cri-tools/releases/download/$VERSION/crictl-${VERSION}-${BUILDX_ARCH}.tar.gz && \
+    tar zxvf crictl-$VERSION-${BUILDX_ARCH}.tar.gz -C /usr/bin && \
+    rm -f crictl-$VERSION-${BUILDX_ARCH}.tar.gz && \
+    apt-get -qq autoremove curl unzip systemd

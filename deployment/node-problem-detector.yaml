@@ -14,6 +14,7 @@ spec:
       labels:
         app: node-problem-detector
     spec:
+      hostNetwork: true
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -28,18 +29,21 @@ spec:
         command:
         - /node-problem-detector
         - --logtostderr
-        - --config.system-log-monitor=/config/kernel-monitor.json,/config/docker-monitor.json
-        image: registry.k8s.io/node-problem-detector/node-problem-detector:v0.8.19
+        - --config.system-log-monitor=/config/kernel-monitor.json
+        - --config.custom-plugin-monitor=/config/inodes-problem-monitor.json,/config/systemd-check-monitor.json,/config/health-checker-kubelet.json,/config/health-checker-containerd.json
+        image: cr-hn-1.bizflycloud.vn/cecd854937c8421b81d1d73789acad52/node-problem-detector:v1.0.1
         resources:
           limits:
-            cpu: 10m
-            memory: 80Mi
+            cpu: 100m
+            memory: 200Mi
           requests:
-            cpu: 10m
-            memory: 80Mi
+            cpu: 100m
+            memory: 200Mi
         imagePullPolicy: Always
         securityContext:
           privileged: true
+          capabilities:
+            add: ["SYS_ADMIN"]
         env:
         - name: NODE_NAME
           valueFrom:
@@ -60,6 +64,21 @@ spec:
         - name: config
           mountPath: /config
           readOnly: true
+        - mountPath: /etc/machine-id
+          name: machine-id
+          readOnly: true
+        - mountPath: /run/systemd/system
+          name: systemd
+        - mountPath: /var/run/containerd/containerd.sock
+          name: containterd-sock
+        - name: cgroup
+          mountPath: /sys/fs/cgroup
+          readOnly: true
+        - mountPath: /var/run/dbus/
+          name: dbus
+          mountPropagation: Bidirectional
+        - name: systemctl
+          mountPath: /bin/systemctl
       serviceAccountName: node-problem-detector
       volumes:
       - name: log
@@ -72,14 +91,49 @@ spec:
       - name: localtime
         hostPath:
           path: /etc/localtime
+      - name: machine-id
+        hostPath:
+          path: /etc/machine-id
+          type: "File"
+      - name: systemd
+        hostPath:
+          path: /run/systemd/system/
+          type: ""
+      - name: dbus
+        hostPath:
+          path: /var/run/dbus/
+          type: ""
+      - name: containterd-sock
+        hostPath:
+          path: /var/run/containerd/containerd.sock
+          type: ""
+      - name: cgroup
+        hostPath:
+          path: /sys/fs/cgroup
+          type: Directory
+      - name: systemctl
+        hostPath: 
+          path: /bin/systemctl
+          type: ""
       - name: config
         configMap:
+          defaultMode: 0777
           name: node-problem-detector-config
           items:
           - key: kernel-monitor.json
             path: kernel-monitor.json
-          - key: docker-monitor.json
-            path: docker-monitor.json
+          - key: check_inodes.sh
+            path: check_inodes.sh
+          - key: check_systemd.sh
+            path: check_systemd.sh
+          - key: inodes-problem-monitor.json
+            path: inodes-problem-monitor.json
+          - key: systemd-check-monitor.json
+            path: systemd-check-monitor.json
+          - key: health-checker-kubelet.json
+            path: health-checker-kubelet.json
+          - key: health-checker-containerd.json
+            path: health-checker-containerd.json
       tolerations:
         - effect: NoSchedule
           operator: Exists
